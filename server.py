@@ -52,6 +52,12 @@ from memory import (
 from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
 from dispatch_registry import DispatchRegistry
 from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
+from qa import QAAgent
+from tracking import SuccessTracker
+from suggestions import suggest_followup
+
+qa_agent = QAAgent()
+success_tracker = SuccessTracker()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("jarvis")
@@ -1311,27 +1317,30 @@ return windowList
             except Exception as e:
                 log.debug(f"Context thread error: {e}")
 
-            # Calendar — via bridge (Docker) or direct AppleScript (native)
+            # Calendar — via bridge (Docker) or direct async call wrapped in asyncio.run()
+            # This thread is NOT the event loop thread, so asyncio.run() is safe here.
             try:
                 bridge_cal = _call_bridge("/calendar/today")
                 if bridge_cal and bridge_cal.get("formatted"):
                     _ctx_cache["calendar"] = bridge_cal["formatted"]
                 else:
-                    from calendar_access import get_todays_events, format_events_for_context
-                    events = get_todays_events()
-                    _ctx_cache["calendar"] = format_events_for_context(events) or "No events today."
+                    events = asyncio.run(get_todays_events())
+                    formatted = format_events_for_context(events)
+                    if formatted:
+                        _ctx_cache["calendar"] = formatted
             except Exception:
                 pass
 
-            # Mail — via bridge or direct
+            # Mail — via bridge or direct async call
             try:
                 bridge_mail = _call_bridge("/mail/unread")
                 if bridge_mail and bridge_mail.get("formatted"):
                     _ctx_cache["mail"] = bridge_mail["formatted"]
                 else:
-                    from mail_access import get_unread_count, format_unread_summary, get_unread_messages
-                    msgs = get_unread_messages(limit=5)
-                    _ctx_cache["mail"] = format_unread_summary(msgs) or "No unread mail."
+                    unread = asyncio.run(get_unread_count())
+                    formatted = format_unread_summary(unread)
+                    if formatted:
+                        _ctx_cache["mail"] = formatted
             except Exception:
                 pass
 
@@ -1614,12 +1623,8 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws):
     }
 
     try:
-        # Run the slow function in a thread pool so it never blocks the event loop
-        loop = asyncio.get_event_loop()
-        result_text = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: asyncio.run(lookup_fn())),
-            timeout=30,
-        )
+        # lookup_fn is async — await it directly on the event loop (no executor needed)
+        result_text = await asyncio.wait_for(lookup_fn(), timeout=30)
 
         _active_lookups[lookup_id]["status"] = "done"
 
@@ -1629,7 +1634,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws):
         try:
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": result_text})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": result_text})
             else:
                 await ws.send_json({"type": "text", "text": result_text})
             await ws.send_json({"type": "status", "state": "idle"})
@@ -1645,7 +1650,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws):
             audio = await synthesize_speech(fallback)
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": fallback})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
             await ws.send_json({"type": "status", "state": "idle"})
         except Exception:
             pass
@@ -1913,7 +1918,7 @@ async def voice_handler(ws: WebSocket):
                 await ws.send_json({"type": "status", "state": "speaking"})
                 audio = await synthesize_speech(tts)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
                     await ws.send_json({"type": "text", "text": response_text})
                 continue
@@ -2392,13 +2397,13 @@ async def api_settings_status():
     # Terminal — check if osascript (AppleScript) is available (macOS only)
     terminal_ok = _shutil.which("osascript") is not None
 
-    # macOS integrations
+    # macOS integrations (all async — must await)
     calendar_ok = mail_ok = notes_ok = False
-    try: get_todays_events(); calendar_ok = True
+    try: await get_todays_events(); calendar_ok = True
     except Exception: pass
-    try: get_unread_count(); mail_ok = True
+    try: await get_unread_count(); mail_ok = True
     except Exception: pass
-    try: get_recent_notes(limit=1); notes_ok = True
+    try: await get_recent_notes(count=1); notes_ok = True
     except Exception: pass
 
     memory_count = task_count = 0
