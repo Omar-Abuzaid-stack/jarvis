@@ -11,12 +11,13 @@ Handles:
 
 import json
 import logging
+import asyncio
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
-import anthropic
-
+from model_router import MODEL_ROUTER
 from templates import TEMPLATES, get_template
 
 log = logging.getLogger("jarvis.planner")
@@ -65,14 +66,14 @@ class PlanningDecision:
 
 async def detect_planning_mode(
     user_text: str,
-    client: Optional[anthropic.AsyncAnthropic] = None,
+    client: Optional[Any] = None,
     force_bypass: bool = False,
 ) -> PlanningDecision:
     """Classify a user request as simple (execute now) or complex (needs planning).
 
     Args:
         user_text: The raw user request.
-        client: Anthropic async client for Haiku classification.
+        client: Gemini client for classification.
         force_bypass: If True, skip planning and apply smart defaults.
 
     Returns:
@@ -124,41 +125,48 @@ def _quick_classify(text: str) -> str:
 
 
 async def _classify_planning_mode_llm(
-    text: str, client: anthropic.AsyncAnthropic
+    text: str, client: Any
 ) -> PlanningDecision:
-    """Use Haiku to classify request and identify missing info."""
+    """Use Gemini to classify request and identify missing info."""
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = await MODEL_ROUTER.complete(
+            client=client,
             max_tokens=400,
-            system=(
-                "You analyze development requests to decide if they need planning.\n"
-                "Respond with JSON only, no markdown fences.\n\n"
-                "Fields:\n"
-                "- needs_planning: bool — true if the request is vague or missing key details\n"
-                "- task_type: build|fix|research|refactor|simple\n"
-                "- confidence: float 0.0-1.0 — how confident you are in the classification\n"
-                "- missing_info: list[str] — what essential info is absent\n\n"
-                "Rules:\n"
-                "- Short/vague build requests ('make a website') → needs_planning=true\n"
-                "- Detailed requests with file paths, specifics → needs_planning=false\n"
-                "- Fix requests with specific file/line info → needs_planning=false\n"
-                "- Fix requests without context → needs_planning=true\n"
-                "- Simple questions/chat → needs_planning=false, task_type=simple\n"
-                "- missing_info should list specific things like: "
-                "project_name, tech_stack, design_requirements, target_file, "
-                "error_details, scope, expected_behavior\n\n"
-                "Examples:\n"
-                '{"needs_planning": true, "task_type": "build", "confidence": 0.95, '
-                '"missing_info": ["project_name", "tech_stack", "design_requirements"]}\n'
-                '{"needs_planning": false, "task_type": "fix", "confidence": 0.9, '
-                '"missing_info": []}\n'
-                '{"needs_planning": false, "task_type": "simple", "confidence": 0.99, '
-                '"missing_info": []}'
-            ),
-            messages=[{"role": "user", "content": text}],
+            task_type="planning",
+            purpose="planning mode detection",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You analyze development requests to decide if they need planning.\n"
+                        "Respond with JSON only, no markdown fences.\n\n"
+                        "Fields:\n"
+                        "- needs_planning: bool — true if the request is vague or missing key details\n"
+                        "- task_type: build|fix|research|refactor|simple\n"
+                        "- confidence: float 0.0-1.0 — how confident you are in the classification\n"
+                        "- missing_info: list[str] — what essential info is absent\n\n"
+                        "Rules:\n"
+                        "- Short/vague build requests ('make a website') → needs_planning=true\n"
+                        "- Detailed requests with file paths, specifics → needs_planning=false\n"
+                        "- Fix requests with specific file/line info → needs_planning=false\n"
+                        "- Fix requests without context → needs_planning=true\n"
+                        "- Simple questions/chat → needs_planning=false, task_type=simple\n"
+                        "- missing_info should list specific things like: "
+                        "project_name, tech_stack, design_requirements, target_file, "
+                        "error_details, scope, expected_behavior\n\n"
+                        "Examples:\n"
+                        '{"needs_planning": true, "task_type": "build", "confidence": 0.95, '
+                        '"missing_info": ["project_name", "tech_stack", "design_requirements"]}\n'
+                        '{"needs_planning": false, "task_type": "fix", "confidence": 0.9, '
+                        '"missing_info": []}\n'
+                        '{"needs_planning": false, "task_type": "simple", "confidence": 0.99, '
+                        '"missing_info": []}'
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
         )
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         data = json.loads(raw)
@@ -394,11 +402,53 @@ class TaskPlanner:
     def is_planning(self) -> bool:
         return self.active_plan is not None and not self.active_plan.confirmed
 
+    async def _invoke_speckit(self, prompt: str, project_path: str) -> str:
+        """Call SpecKit (specify CLI) to structure the prompt and optimize context."""
+        log.info(f"Invoking SpecKit for optimization in {project_path}")
+        
+        # Determine the correct binary path
+        spec_kit_bin = str(Path.home() / "Desktop/spec-kit/venv/bin/specify")
+        if not Path(spec_kit_bin).exists():
+            # Fallback to path search
+            import shutil
+            spec_kit_bin = shutil.which("specify") or shutil.which("speckit")
+        
+        if not spec_kit_bin:
+            log.warning("SpecKit CLI not found. Skipping SpecKit optimization.")
+            return prompt
+
+        try:
+            # We want to use SpecKit to "structure" the prompt.
+            # For now, let's assume we can pass the prompt and get a structured spec back.
+            # Using 'specify init --force --here' ensures .specify directory is ready.
+            cmd = [spec_kit_bin, "init", "--here", "--force", "--ai", "claude"]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=project_path,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await proc.wait()
+            
+            # Now Speckit has created the .specify directory.
+            # We should read the spec/plan if they exist to optimize the context.
+            spec_path = Path(project_path) / ".specify" / "specs"
+            if spec_path.exists():
+                # Find the latest spec directory
+                latest_spec = sorted(spec_path.glob("*/spec.md"))
+                if latest_spec:
+                    refined_spec = latest_spec[-1].read_text()
+                    log.info("SpecKit optimization successful. Refined prompt with spec context.")
+                    return f"{prompt}\n\n## SpecKit Optimized Architecture\n{refined_spec}"
+            
+            return prompt
+        except Exception as e:
+            log.warning(f"SpecKit invocation failed: {e}")
+            return prompt
+
     async def start_planning(
         self,
         user_request: str,
         projects: list[dict],
-        client: anthropic.AsyncAnthropic,
+        client: Any,
     ) -> dict:
         """Analyze request and determine what questions to ask.
 
@@ -659,6 +709,10 @@ class TaskPlanner:
         if context_section:
             prompt += "\n\n" + context_section
 
+        # Final SpecKit Optimization Pass
+        if plan.project_path:
+            prompt = await self._invoke_speckit(prompt, plan.project_path)
+
         return prompt
 
     def get_working_dir(self) -> str:
@@ -673,26 +727,33 @@ class TaskPlanner:
 
     # -- Private helpers --
 
-    async def _classify_request(self, text: str, client: anthropic.AsyncAnthropic) -> dict:
-        """Use Haiku to classify request type and extract known info."""
+    async def _classify_request(self, text: str, client: Any) -> dict:
+        """Use Gemini to classify request type and extract known info."""
         try:
-            response = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await MODEL_ROUTER.complete(
+                client=client,
                 max_tokens=300,
-                system=(
-                    "Classify this development request. Respond with JSON only, no markdown.\n"
-                    "Fields:\n"
-                    "- task_type: build|fix|research|refactor|run|feature\n"
-                    "- project: project name mentioned (or empty string)\n"
-                    "- inferred: dict of any info you can extract from the request "
-                    "(keys: tech_stack, details, error, target, goal, depth, output_format)\n"
-                    "Only include inferred keys that are clearly stated.\n"
-                    'Example: {"task_type": "build", "project": "roofo", '
-                    '"inferred": {"tech_stack": "React", "details": "landing page with hero and pricing"}}'
-                ),
-                messages=[{"role": "user", "content": text}],
+                task_type="planning",
+                purpose="planning request classification",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Classify this development request. Respond with JSON only, no markdown.\n"
+                            "Fields:\n"
+                            "- task_type: build|fix|research|refactor|run|feature\n"
+                            "- project: project name mentioned (or empty string)\n"
+                            "- inferred: dict of any info you can extract from the request "
+                            "(keys: tech_stack, details, error, target, goal, depth, output_format)\n"
+                            "Only include inferred keys that are clearly stated.\n"
+                            'Example: {"task_type": "build", "project": "roofo", '
+                            '"inferred": {"tech_stack": "React", "details": "landing page with hero and pricing"}}'
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
             )
-            raw = response.content[0].text.strip()
+            raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             return json.loads(raw)

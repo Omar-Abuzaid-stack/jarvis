@@ -48,7 +48,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
 
   const mat = new THREE.PointsMaterial({
-    color: 0x4ca8e8, size: 0.4, transparent: true, opacity: 0.6,
+    color: 0xe33b3b, size: 0.4, transparent: true, opacity: 0.7,
     sizeAttenuation: true, blending: THREE.AdditiveBlending, depthWrite: false,
   });
 
@@ -63,7 +63,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   lineGeo.setDrawRange(0, 0);
 
   const lineMat = new THREE.LineBasicMaterial({
-    color: 0x4ca8e8, transparent: true, opacity: 0.0,
+    color: 0xff6b6b, transparent: true, opacity: 0.0,
     blending: THREE.AdditiveBlending, depthWrite: false,
   });
 
@@ -78,7 +78,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   electronGeo.setDrawRange(0, 0);
 
   const electronMat = new THREE.PointsMaterial({
-    color: 0xffffff, size: 0.8, transparent: true, opacity: 1.0,
+    color: 0xffc4c4, size: 0.9, transparent: true, opacity: 1.0,
     sizeAttenuation: true, blending: THREE.AdditiveBlending, depthWrite: false,
   });
 
@@ -302,9 +302,9 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
     mat.opacity = currentBright + bass * 0.08;
     mat.size = currentSize + bass * 0.05;
 
-    if (state === "thinking") { mat.color.lerp(new THREE.Color(0x6ec4ff), 0.015); lineMat.color.lerp(new THREE.Color(0x6ec4ff), 0.015); }
-    else if (state === "speaking") { mat.color.lerp(new THREE.Color(0x5ab8f0), 0.015); lineMat.color.lerp(new THREE.Color(0x5ab8f0), 0.015); }
-    else { mat.color.lerp(new THREE.Color(0x4ca8e8), 0.015); lineMat.color.lerp(new THREE.Color(0x4ca8e8), 0.015); }
+    const pulseColor = new THREE.Color(0xe33b3b);
+    mat.color.lerp(pulseColor, 0.015);
+    lineMat.color.lerp(new THREE.Color(0xff6b6b), 0.015);
 
     camera.position.x = Math.sin(t * 0.02) * 5;
     camera.position.y = Math.cos(t * 0.03) * 3;

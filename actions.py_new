@@ -1,0 +1,31 @@
+import asyncio
+import os
+import subprocess
+import time
+import json
+import logging
+import requests
+from pathlib import Path
+
+# ... (other imports)
+
+async def open_browser(url: str, browser: str = "comet") -> dict:
+    """Open URL. If local JARVIS, routes through the central server logic."""
+    is_local = "8340" in url
+    
+    if is_local:
+        try:
+            # Route to central singleton logic in server.py via API
+            # This ensures we always reuse the tab and follow normalization rules
+            res = requests.post("http://127.0.0.1:8340/api/page/focus", json={"url": url}, timeout=2)
+            if res.status_code == 200:
+                return {"success": True, "confirmation": "Dashboard is focused, sir."}
+        except:
+            pass # Fallback to shell open if server is unreachable
+            
+    # Standard shell open as fallback or for external URLs
+    try:
+        subprocess.run(["open", "-g", url], check=True)
+        return {"success": True, "confirmation": f"Opening {url}, sir."}
+    except Exception as e:
+        return {"success": False, "error": str(e), "confirmation": "I had trouble opening the browser, sir."}

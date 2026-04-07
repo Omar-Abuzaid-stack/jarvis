@@ -12,6 +12,8 @@ import time as _time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from time_utils import now_local
+
 log = logging.getLogger("jarvis.calendar")
 
 # Calendars to scan — set CALENDAR_ACCOUNTS env var to a comma-separated list,
@@ -27,6 +29,21 @@ _auto_discovered = False
 _event_cache: list[dict] = []
 _cache_time: float = 0
 _calendar_launched = False
+
+_MONTH_NAMES = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
 
 # Per-calendar AppleScript: bulk property access (fast), no `whose` clause
 _BULK_SCRIPT = '''
@@ -81,8 +98,7 @@ async def _fetch_calendar_events(cal_name: str, timeout: float = 12.0) -> list[d
             return []
 
         # Parse and filter to today
-        now = datetime.now()
-        today_date = now.date()
+        today_date = now_local().date()
         events = []
 
         for line in raw.split("\n"):
@@ -192,7 +208,7 @@ async def get_todays_events() -> list[dict]:
 async def get_upcoming_events(hours: int = 4) -> list[dict]:
     """Get events in the next N hours from cache."""
     events = await get_todays_events()
-    now = datetime.now()
+    now = now_local()
     cutoff = now + timedelta(hours=hours)
     return [
         e for e in events
@@ -222,6 +238,96 @@ async def get_calendar_names() -> list[str]:
     except Exception:
         pass
     return []
+
+
+def _escape_applescript_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _normalize_event_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _date_builder(var_name: str, value: datetime) -> str:
+    month_name = _MONTH_NAMES[value.month]
+    seconds = (value.hour * 3600) + (value.minute * 60) + value.second
+    return (
+        f"set {var_name} to (current date)\n"
+        f"set year of {var_name} to {value.year}\n"
+        f"set month of {var_name} to {month_name}\n"
+        f"set day of {var_name} to {value.day}\n"
+        f"set time of {var_name} to {seconds}"
+    )
+
+
+async def create_calendar_event(
+    title: str,
+    start_iso: str,
+    end_iso: str = "",
+    calendar_name: str = "",
+    location: str = "",
+    notes: str = "",
+    alarm_minutes: int = 60,
+) -> bool:
+    """Create an Apple Calendar event with an optional reminder alarm."""
+    await _ensure_calendar_running()
+
+    start_dt = _normalize_event_datetime(start_iso)
+    end_dt = _normalize_event_datetime(end_iso) if end_iso.strip() else start_dt + timedelta(hours=1)
+
+    if end_dt <= start_dt:
+        end_dt = start_dt + timedelta(hours=1)
+
+    target_calendar = calendar_name.strip()
+    if not target_calendar:
+        if USER_CALENDARS:
+            target_calendar = USER_CALENDARS[0]
+        else:
+            calendars = await get_calendar_names()
+            if not calendars:
+                return False
+            target_calendar = calendars[0]
+
+    escaped_title = _escape_applescript_string(title)
+    escaped_calendar = _escape_applescript_string(target_calendar)
+    escaped_location = _escape_applescript_string(location)
+    escaped_notes = _escape_applescript_string(notes)
+
+    alarm_block = ""
+    if alarm_minutes >= 0:
+        alarm_block = (
+            "tell newEvent\n"
+            f"        make new display alarm at end with properties {{trigger interval:-{alarm_minutes * 60}}}\n"
+            "    end tell\n"
+        )
+
+    script = f'''
+tell application "Calendar"
+    {_date_builder("startDate", start_dt)}
+    {_date_builder("endDate", end_dt)}
+    tell calendar "{escaped_calendar}"
+        set newEvent to make new event at end with properties {{summary:"{escaped_title}", start date:startDate, end date:endDate, location:"{escaped_location}", description:"{escaped_notes}"}}
+    end tell
+    {alarm_block}return "OK"
+end tell
+'''
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode == 0 and stdout.decode().strip() == "OK":
+            log.info("Created calendar event '%s' on %s", title, target_calendar)
+            return True
+        log.warning("Calendar create failed: %s", stderr.decode().strip()[:200])
+    except Exception as e:
+        log.warning("Calendar create error: %s", e)
+    return False
 
 
 def format_events_for_context(events: list[dict]) -> str:

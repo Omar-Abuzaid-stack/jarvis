@@ -12,8 +12,9 @@ JARVIS reads the responses via subprocess, summarizes, and reports back.
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
+
+from provider_router import PROVIDER_ROUTER
 
 log = logging.getLogger("jarvis.work_mode")
 
@@ -33,6 +34,7 @@ class WorkSession:
         self._project_name: str | None = None
         self._message_count = 0  # Track if this is first message (no --continue)
         self._status = "idle"  # idle, working, done
+        self._provider_name = "local_system"
 
     @property
     def active(self) -> bool:
@@ -46,6 +48,10 @@ class WorkSession:
     def status(self) -> str:
         return self._status
 
+    @property
+    def provider_name(self) -> str:
+        return self._provider_name
+
     async def start(self, working_dir: str, project_name: str = None):
         """Start or switch to a project session."""
         self._working_dir = working_dir
@@ -53,61 +59,37 @@ class WorkSession:
         self._active = True
         self._message_count = 0
         self._status = "idle"
+        self._provider_name = "local_system"
         log.info(f"Work mode started: {self._project_name} ({working_dir})")
 
-    async def send(self, user_text: str) -> str:
-        """Send a message to claude -p and get the full response.
-
-        First message in a session: fresh claude -p
-        Subsequent messages: claude -p --continue (resumes last session in dir)
-        """
-        claude_path = shutil.which("claude")
-        if not claude_path:
-            return "Claude CLI not found on this system."
-
-        cmd = [
-            claude_path, "-p",
-            "--output-format", "text",
-            "--dangerously-skip-permissions",
-        ]
-
-        # Use --continue for subsequent messages to maintain context
-        if self._message_count > 0:
-            cmd.append("--continue")
-
+    async def send(self, user_text: str, *, preferred_provider: str | None = None) -> str:
+        """Send a message to the best available heavy-task provider."""
         self._status = "working"
-
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self._working_dir,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=user_text.encode()),
-                timeout=300,
-            )
-
-            response = stdout.decode().strip()
+            result = await PROVIDER_ROUTER.run_heavy_task(user_text, self._working_dir or ".", preferred_provider=preferred_provider)
+            self._provider_name = result.provider
             self._message_count += 1
-            self._status = "done"
+            if result.ok:
+                self._status = "done"
+                log.info(
+                    "Work provider response project=%s provider=%s chars=%s fallback=%s",
+                    self._project_name,
+                    result.provider,
+                    len(result.output),
+                    "yes" if result.fallback_used else "no",
+                )
+                return result.output
 
-            if process.returncode != 0:
-                error = stderr.decode().strip()[:200]
-                log.error(f"claude -p error: {error}")
+            if result.status in ("quota_blocked", "rate_limited", "rate_limited_backend"):
+                self._status = "rate_limited"
+                return f"{result.provider} is out of tokens at the moment, sir."
+            elif result.status in ("misconfigured", "auth_failed"):
+                self._status = "auth_required"
+            elif result.status == "timeout":
+                self._status = "timeout"
+            else:
                 self._status = "error"
-                return f"Hit a problem, sir: {error}"
-
-            log.info(f"Claude Code response for {self._project_name} ({len(response)} chars)")
-            return response
-
-        except asyncio.TimeoutError:
-            log.error("claude -p timed out after 300s")
-            self._status = "timeout"
-            return "That's taking longer than expected, sir. The operation timed out."
+            return f"Hit a problem, sir: {result.reason}"
         except Exception as e:
             log.error(f"Work mode error: {e}")
             self._status = "error"
@@ -121,6 +103,7 @@ class WorkSession:
         self._project_name = None
         self._message_count = 0
         self._status = "idle"
+        self._provider_name = "local_system"
         log.info(f"Work mode ended for {project}")
 
     def _save_session(self):

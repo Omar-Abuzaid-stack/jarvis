@@ -11,6 +11,8 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Optional
 
+from provider_router import PROVIDER_ROUTER
+
 log = logging.getLogger("jarvis.qa")
 
 MAX_RETRIES = 3
@@ -45,22 +47,10 @@ class QAAgent:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
-                "--dangerously-skip-permissions",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=qa_prompt.encode()),
-                timeout=120.0,
-            )
-
-            raw = stdout.decode().strip()
+            result = await PROVIDER_ROUTER.run_heavy_task(qa_prompt, working_dir)
+            raw = result.output.strip()
+            if not result.ok:
+                raise RuntimeError(result.reason)
 
             # Try to parse JSON from the response
             try:
@@ -94,11 +84,11 @@ class QAAgent:
                 summary="QA timed out",
             )
         except FileNotFoundError:
-            log.error("claude CLI not found for QA")
+            log.error("No heavy-task provider available for QA")
             return QAResult(
                 passed=True,
-                issues=["claude CLI not available for QA"],
-                summary="QA skipped — CLI not found",
+                issues=["No heavy-task provider available for QA"],
+                summary="QA skipped — provider unavailable",
             )
         except Exception as e:
             log.error(f"QA error: {e}")
@@ -133,34 +123,19 @@ class QAAgent:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
-                "--dangerously-skip-permissions",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=retry_prompt.encode()),
-                timeout=300.0,
-            )
-
-            if process.returncode == 0:
-                result = stdout.decode().strip()
+            provider_result = await PROVIDER_ROUTER.run_heavy_task(retry_prompt, working_dir)
+            if provider_result.ok:
                 return {
                     "status": "completed",
-                    "result": result,
+                    "result": provider_result.output,
                     "error": "",
                     "attempt": attempt + 1,
                 }
             else:
                 return {
                     "status": "failed",
-                    "result": stdout.decode().strip(),
-                    "error": stderr.decode().strip(),
+                    "result": provider_result.output,
+                    "error": provider_result.reason,
                     "attempt": attempt + 1,
                 }
 

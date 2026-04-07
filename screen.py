@@ -13,6 +13,8 @@ import logging
 import tempfile
 from pathlib import Path
 
+from model_router import MODEL_ROUTER
+
 log = logging.getLogger("jarvis.screen")
 
 
@@ -151,48 +153,46 @@ async def take_screenshot(display_only: bool = True) -> str | None:
             pass
 
 
-async def describe_screen(anthropic_client) -> str:
-    """Describe what's on the user's screen.
+async def describe_screen(gemini_client) -> str:
+    """Describe what's on the user's screen using Gemini vision.
 
-    Tries screenshot + vision first. Falls back to window list + LLM summary.
+    Tries screenshot + vision first. Falls back to window list + text summary.
     """
-    # Try screenshot + vision
+    # ── Try screenshot + Gemini vision first ──
     screenshot_b64 = await take_screenshot()
-    if screenshot_b64 and anthropic_client:
+    if screenshot_b64 and gemini_client:
         try:
-            response = await anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await MODEL_ROUTER.complete(
+                client=gemini_client,
                 max_tokens=300,
-                system=(
-                    "You are JARVIS analyzing a screenshot of the user's desktop. "
-                    "Describe what you see concisely: which apps are open, what the user "
-                    "appears to be working on, any notable content visible. "
-                    "Be specific about app names, file names, URLs, code, or documents visible. "
-                    "2-4 sentences max. No markdown."
-                ),
+                task_type="vision",
+                purpose="screen description from screenshot",
                 messages=[{
                     "role": "user",
                     "content": [
                         {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": screenshot_b64,
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_b64}",
                             },
                         },
                         {
                             "type": "text",
-                            "text": "What's on my screen right now?",
+                            "text": (
+                                "You are JARVIS. Describe what is on the user's screen concisely: "
+                                "which apps are open, what the user appears to be working on, "
+                                "any notable content visible. Be specific about app names, URLs, "
+                                "code, or documents visible. 2-4 sentences max. No markdown."
+                            ),
                         },
                     ],
                 }],
             )
-            return response.content[0].text
+            return response.choices[0].message.content
         except Exception as e:
             log.warning(f"Vision call failed, falling back to window list: {e}")
 
-    # Fallback: get window list and have LLM summarize
+    # ── Fallback: get window list and summarize with text ──
     windows = await get_active_windows()
     apps = await get_running_apps()
 
@@ -212,18 +212,25 @@ async def describe_screen(anthropic_client) -> str:
         if bg_apps:
             context_parts.append(f"Background apps: {', '.join(bg_apps)}")
 
-    if anthropic_client and context_parts:
+    if gemini_client and context_parts:
         try:
-            response = await anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await MODEL_ROUTER.complete(
+                client=gemini_client,
                 max_tokens=100,
-                system=(
-                    "You are JARVIS. Given the user's open windows and apps, summarize "
-                    "what they appear to be working on in 1-2 sentences. Natural voice, no markdown."
-                ),
-                messages=[{"role": "user", "content": "Open windows:\n" + "\n".join(context_parts)}],
+                task_type="vision",
+                purpose="screen description from window list",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are JARVIS. Given the user's open windows and apps, summarize "
+                            "what they appear to be working on in 1-2 sentences. Natural voice, no markdown."
+                        ),
+                    },
+                    {"role": "user", "content": "Open windows:\n" + "\n".join(context_parts)},
+                ],
             )
-            return response.content[0].text
+            return response.choices[0].message.content
         except Exception:
             pass
 

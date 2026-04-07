@@ -1,11 +1,8 @@
 """
-JARVIS Mail Access — READ-ONLY access to Apple Mail.
+JARVIS Mail Access — Apple Mail integration.
 
 Any accounts synced to Mail.app (Gmail, iCloud, Exchange, etc.)
 are automatically available. No OAuth needed.
-
-IMPORTANT: This module is intentionally READ-ONLY.
-No send, delete, move, or modify functions exist by design.
 """
 
 import asyncio
@@ -74,6 +71,21 @@ async def _run_mail_script(script: str, timeout: float = 20) -> str:
     except Exception as e:
         log.warning(f"Mail script error: {e}")
         return ""
+
+
+def _escape_applescript_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _recipient_blocks(raw: str, kind: str) -> str:
+    recipients = [entry.strip() for entry in raw.replace(";", ",").split(",") if entry.strip()]
+    lines = []
+    for address in recipients:
+        escaped = _escape_applescript_string(address)
+        lines.append(
+            f'make new {kind} recipient at end of {kind} recipients with properties {{address:"{escaped}"}}'
+        )
+    return "\n        ".join(lines)
 
 
 async def get_accounts() -> list[str]:
@@ -342,6 +354,44 @@ end tell
             "content": parts[3].strip(),
         }
     return None
+
+
+async def send_mail(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+) -> bool:
+    """Send an email via Apple Mail."""
+    await _ensure_mail_running()
+
+    to_block = _recipient_blocks(to, "to")
+    if not to_block:
+        return False
+
+    cc_block = _recipient_blocks(cc, "cc")
+    bcc_block = _recipient_blocks(bcc, "bcc")
+    escaped_subject = _escape_applescript_string(subject)
+    escaped_body = _escape_applescript_string(body)
+
+    script = f'''
+tell application "Mail"
+    set newMessage to make new outgoing message with properties {{visible:false, subject:"{escaped_subject}", content:"{escaped_body}"}}
+    tell newMessage
+        {to_block}
+        {cc_block}
+        {bcc_block}
+        send
+    end tell
+    return "OK"
+end tell
+'''
+    result = await _run_mail_script(script, timeout=25)
+    if result == "OK":
+        log.info("Mail sent to %s subject=%s", to, subject[:120])
+        return True
+    return False
 
 
 def format_unread_summary(unread: dict) -> str:

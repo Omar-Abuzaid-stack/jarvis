@@ -16,6 +16,7 @@ from urllib.parse import quote
 log = logging.getLogger("jarvis.actions")
 
 DESKTOP_PATH = Path.home() / "Desktop"
+HOME_PATH = Path.home().resolve()
 
 
 async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
@@ -111,29 +112,64 @@ async def open_terminal(command: str = "") -> dict:
         "success": success,
         "confirmation": "Terminal is open, sir." if success else "I had trouble opening Terminal, sir.",
     }
+async def open_browser(url: str, browser: str = "comet") -> dict:
+    """Open URL. If local JARVIS, routes through the central server logic."""
+    is_local = "8340" in url
+    
+    if is_local:
+        try:
+            # Route to central singleton logic in server.py via API
+            import requests
+            res = requests.post("http://127.0.0.1:8340/api/page/focus", json={"url": url}, timeout=2)
+            if res.status_code == 200:
+                return {"success": True, "confirmation": "Dashboard is focused, sir."}
+        except:
+            pass # Fallback to shell open if server is unreachable
+            
+    # Standard shell open as fallback or for external URLs
+    try:
+        import subprocess
+        subprocess.run(["open", "-g", url], check=True)
+        return {"success": True, "confirmation": "The browser is ready, sir."}
+    except Exception as e:
+        return {"success": False, "error": str(e), "confirmation": "I had trouble opening the browser, sir."}
 
 
-async def open_browser(url: str, browser: str = "chrome") -> dict:
-    """Open URL in user's browser (Chrome or Firefox)."""
-    escaped_url = url.replace('"', '\\"')
+# Keep backward compat — both now route to Comet
+async def open_chrome(url: str) -> dict:
+    return await open_browser(url, "comet")
 
-    if browser.lower() == "firefox":
-        app_name = "Firefox"
-        script = (
-            'tell application "Firefox"\n'
-            "    activate\n"
-            f'    open location "{escaped_url}"\n'
-            "end tell"
-        )
+
+def _resolve_safe_user_path(target: str) -> Path:
+    candidate = Path(target.strip().replace("file://", "")).expanduser()
+    if not candidate.is_absolute():
+        candidate = (HOME_PATH / candidate).resolve()
     else:
-        app_name = "Chrome"
-        script = (
-            'tell application "Google Chrome"\n'
-            "    activate\n"
-            f'    open location "{escaped_url}"\n'
-            "end tell"
-        )
+        candidate = candidate.resolve()
 
+    if candidate == HOME_PATH:
+        raise ValueError("Refusing to delete the home directory")
+    if HOME_PATH not in candidate.parents:
+        raise ValueError("Refusing to delete files outside the home directory")
+    return candidate
+
+
+async def move_path_to_trash(target: str) -> dict:
+    """Move a file or folder to Trash using Finder for recoverable deletion."""
+    try:
+        path = _resolve_safe_user_path(target)
+    except ValueError as exc:
+        return {"success": False, "confirmation": str(exc)}
+
+    if not path.exists():
+        return {"success": False, "confirmation": f"Couldn't find {path.name}, sir."}
+
+    escaped_path = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    script = (
+        'tell application "Finder"\n'
+        f'    delete POSIX file "{escaped_path}"\n'
+        "end tell"
+    )
     proc = await asyncio.create_subprocess_exec(
         "osascript", "-e", script,
         stdout=asyncio.subprocess.PIPE,
@@ -142,30 +178,18 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
     _, stderr = await proc.communicate()
     success = proc.returncode == 0
     if not success:
-        log.error(f"open_browser ({app_name}) failed: {stderr.decode()}")
+        log.error(f"move_path_to_trash failed: {stderr.decode()[:300]}")
     return {
         "success": success,
-        "confirmation": f"Pulled that up in {app_name}, sir." if success else f"{app_name} ran into a problem, sir.",
+        "confirmation": f"Moved {path.name} to the Trash, sir." if success else f"I couldn't delete {path.name}, sir.",
     }
 
 
-# Keep backward compat
-async def open_chrome(url: str) -> dict:
-    return await open_browser(url, "chrome")
-
-
 async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
-    """Open Terminal, cd to project dir, run Claude Code interactively.
-
-    Writes the prompt to CLAUDE.md (which claude reads automatically on startup)
-    then launches claude in interactive mode with --dangerously-skip-permissions.
-    No prompt escaping needed — CLAUDE.md handles context delivery.
-    """
-    # Write prompt to CLAUDE.md — claude reads this automatically
+    """Open Terminal, cd to project dir, run Claude Code interactively."""
     claude_md = Path(project_dir) / "CLAUDE.md"
-    claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
+    claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely.\n")
 
-    # Launch claude interactive — it reads CLAUDE.md on its own
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
@@ -179,15 +203,60 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
     )
     _, stderr = await proc.communicate()
     success = proc.returncode == 0
-    if not success:
-        log.error(f"open_claude_in_project failed: {stderr.decode()}")
-    else:
-        await _mark_terminal_as_jarvis()
+    if success: await _mark_terminal_as_jarvis()
     return {
         "success": success,
-        "confirmation": "Claude Code is running in Terminal, sir. You can watch the progress."
-        if success
-        else "Had trouble spawning Claude Code, sir.",
+        "confirmation": "Claude Code is running, sir." if success else "Had trouble spawning Claude Code, sir.",
+    }
+
+
+async def open_antigravity_in_project(project_dir: str, prompt: str) -> dict:
+    """Open Terminal, cd to project dir, run AntiGravity CLI."""
+    # AntiGravity often uses specialized skills, so we ensure the prompt is structured
+    agy_bin = str(Path.home() / ".antigravity/antigravity/bin/antigravity")
+    if not Path(agy_bin).exists():
+        import shutil
+        agy_bin = shutil.which("antigravity") or "antigravity"
+
+    script = (
+        'tell application "Terminal"\n'
+        "    activate\n"
+        f'    do script "cd {project_dir} && {agy_bin} --prompt \\"{prompt}\\" --ai-skills"\n'
+        "end tell"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        "osascript", "-e", script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    success = proc.returncode == 0
+    if success: await _mark_terminal_as_jarvis()
+    return {
+        "success": success,
+        "confirmation": "AntiGravity has been summoned to the project, sir." if success else "AntiGravity failed to launch, sir.",
+    }
+
+
+async def open_opencode_in_project(project_dir: str, prompt: str) -> dict:
+    """Open Terminal, cd to project dir, run OpenCode CLI."""
+    script = (
+        'tell application "Terminal"\n'
+        "    activate\n"
+        f'    do script "cd {project_dir} && opencode --prompt \\"{prompt}\\""\n'
+        "end tell"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        "osascript", "-e", script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    success = proc.returncode == 0
+    if success: await _mark_terminal_as_jarvis()
+    return {
+        "success": success,
+        "confirmation": "OpenCode is executing the task, sir." if success else "OpenCode encounterd an error, sir.",
     }
 
 
@@ -276,9 +345,9 @@ return "OK"
 
 
 async def get_chrome_tab_info() -> dict:
-    """Read the current Chrome tab's title and URL via AppleScript."""
+    """Read the current Comet tab's title and URL via AppleScript."""
     script = (
-        'tell application "Google Chrome"\n'
+        'tell application "Comet"\n'
         "    set tabTitle to title of active tab of front window\n"
         "    set tabURL to URL of active tab of front window\n"
         '    return tabTitle & "|" & tabURL\n'
@@ -355,23 +424,26 @@ async def execute_action(intent: dict, projects: list = None) -> dict:
         else:
             url = f"https://www.google.com/search?q={quote(target)}"
 
-        # Detect which browser user wants
-        target_lower = target.lower()
-        if "firefox" in target_lower:
-            browser = "firefox"
-        else:
-            browser = "chrome"
-
-        result = await open_browser(url, browser)
+        # Always Comet — it's the designated JARVIS browser
+        result = await open_browser(url, "comet")
         result["project_dir"] = None
         return result
 
     elif action == "build":
-        # Create project folder on Desktop, spawn Claude Code
+        # Create project folder on Desktop
         project_name = _generate_project_name(target)
         project_dir = str(DESKTOP_PATH / project_name)
         os.makedirs(project_dir, exist_ok=True)
-        result = await open_claude_in_project(project_dir, target)
+
+        # Decide which agent to use
+        # Defaults to Claude Code unless specifically requested
+        if "antigravity" in target.lower() or "agy" in target.lower():
+            result = await open_antigravity_in_project(project_dir, target)
+        elif "opencode" in target.lower():
+            result = await open_opencode_in_project(project_dir, target)
+        else:
+            result = await open_claude_in_project(project_dir, target)
+            
         result["project_dir"] = project_dir
         return result
 

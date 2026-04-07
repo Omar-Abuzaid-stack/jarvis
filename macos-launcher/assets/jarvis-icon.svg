@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#0e1336"/>
+      <stop offset="65%" stop-color="#060818"/>
+      <stop offset="100%" stop-color="#02030a"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="coreGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .ring { fill: none; stroke: #8ab8ff; stroke-opacity: .35; stroke-width: 2.5; }
+      .net { fill: none; stroke: #dff0ff; stroke-opacity: .82; stroke-width: 3.6; stroke-linecap: round; }
+      .spark { fill: #edf8ff; }
+      .spark-soft { fill: #8fc0ff; fill-opacity: .9; }
+    </style>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <g transform="translate(512 512)">
+    <circle r="390" class="ring"/>
+    <ellipse rx="360" ry="305" class="ring" transform="rotate(18)"/>
+    <ellipse rx="332" ry="370" class="ring" transform="rotate(-24)"/>
+    <ellipse rx="290" ry="382" class="ring" transform="rotate(61)"/>
+    <ellipse rx="385" ry="240" class="ring" transform="rotate(-58)"/>
+  </g>
+
+  <g filter="url(#glow)">
+    <path class="net" d="M176 628 L250 770 L390 735 L520 606 L570 450 L468 266 L318 230 L212 334 L176 628"/>
+    <path class="net" d="M252 768 L314 546 L430 442 L620 420 L762 312 L878 404 L824 604 L674 730 L530 792 L392 734"/>
+    <path class="net" d="M320 230 L430 444 L510 606 L676 730 L814 602 L878 406 L770 234 L598 178 L438 184 L320 230"/>
+    <path class="net" d="M204 334 L438 184 L596 178 L760 234 L880 404"/>
+    <path class="net" d="M176 628 L430 444 L600 178"/>
+    <path class="net" d="M314 546 L520 606 L824 604"/>
+    <path class="net" d="M252 768 L430 444 L762 312"/>
+    <path class="net" d="M390 734 L570 450 L878 404"/>
+    <path class="net" d="M468 266 L620 420 L770 234"/>
+    <path class="net" d="M212 334 L468 266 L762 312"/>
+  </g>
+
+  <g filter="url(#coreGlow)">
+    <circle cx="512" cy="512" r="28" fill="#ffffff"/>
+    <circle cx="512" cy="512" r="54" fill="#dbeeff" fill-opacity=".55"/>
+    <path d="M512 396 L530 478 L612 430 L548 496 L640 512 L548 528 L610 596 L530 548 L512 630 L494 548 L414 596 L476 528 L384 512 L476 496 L412 430 L494 478 Z" fill="#ffffff" fill-opacity=".98"/>
+  </g>
+
+  <g filter="url(#glow)">
+    <circle class="spark" cx="176" cy="628" r="5"/>
+    <circle class="spark" cx="250" cy="770" r="6"/>
+    <circle class="spark" cx="390" cy="735" r="5"/>
+    <circle class="spark" cx="430" cy="444" r="7"/>
+    <circle class="spark" cx="520" cy="606" r="6"/>
+    <circle class="spark" cx="570" cy="450" r="6"/>
+    <circle class="spark" cx="620" cy="420" r="5"/>
+    <circle class="spark" cx="674" cy="730" r="5"/>
+    <circle class="spark" cx="762" cy="312" r="6"/>
+    <circle class="spark" cx="824" cy="604" r="7"/>
+    <circle class="spark" cx="878" cy="404" r="6"/>
+    <circle class="spark" cx="770" cy="234" r="5"/>
+    <circle class="spark" cx="598" cy="178" r="5"/>
+    <circle class="spark" cx="468" cy="266" r="6"/>
+    <circle class="spark" cx="318" cy="230" r="5"/>
+    <circle class="spark" cx="212" cy="334" r="5"/>
+
+    <circle class="spark-soft" cx="214" cy="680" r="3"/>
+    <circle class="spark-soft" cx="274" cy="706" r="2.5"/>
+    <circle class="spark-soft" cx="350" cy="610" r="2.5"/>
+    <circle class="spark-soft" cx="382" cy="526" r="3"/>
+    <circle class="spark-soft" cx="476" cy="348" r="2.5"/>
+    <circle class="spark-soft" cx="568" cy="332" r="2.5"/>
+    <circle class="spark-soft" cx="688" cy="380" r="3"/>
+    <circle class="spark-soft" cx="748" cy="462" r="2.5"/>
+    <circle class="spark-soft" cx="748" cy="560" r="3"/>
+    <circle class="spark-soft" cx="604" cy="658" r="2.5"/>
+    <circle class="spark-soft" cx="496" cy="708" r="2.5"/>
+    <circle class="spark-soft" cx="334" cy="350" r="2.5"/>
+    <circle class="spark-soft" cx="274" cy="454" r="2.5"/>
+    <circle class="spark-soft" cx="656" cy="248" r="2.5"/>
+  </g>
+</svg>

@@ -1,106 +1,98 @@
 /**
- * Voice input (Web Speech API) and audio output (AudioContext) for JARVIS.
+ * Voice input placeholder and audio output for JARVIS.
+ * UPDATED: Browser-side microphone ownership REMOVED.
+ * Native/background process now owns the mic lifecycle exclusively.
  */
-
-// ---------------------------------------------------------------------------
-// Speech Recognition
-// ---------------------------------------------------------------------------
 
 export interface VoiceInput {
   start(): void;
   stop(): void;
   pause(): void;
   resume(): void;
+  setActive(active: boolean): void;
+  isActive(): boolean;
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-declare const webkitSpeechRecognition: any;
 
 export function createVoiceInput(
   onTranscript: (text: string) => void,
-  onError: (msg: string) => void
+  onError: (msg: string, reason?: any) => void,
 ): VoiceInput {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const SR = (window as any).SpeechRecognition || (typeof webkitSpeechRecognition !== "undefined" ? webkitSpeechRecognition : null);
-  if (!SR) {
-    onError("Speech recognition not supported in this browser");
-    return { start() {}, stop() {}, pause() {}, resume() {} };
+  const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+  if (!SpeechRecognition) {
+    return {
+      start() { onError("Speech recognition not supported."); },
+      stop() {}, pause() {}, resume() {}, setActive() {},
+      isActive: () => false,
+    };
   }
 
-  const recognition = new SR();
+  const recognition = new SpeechRecognition();
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.lang = "en-US";
 
-  let shouldListen = false;
-  let paused = false;
+  let active = false;
+  let silenceTimer: any = null;
+  let currentInterim = "";
 
-  recognition.onresult = (event: any) => {
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (event.results[i].isFinal) {
-        const text = event.results[i][0].transcript.trim();
-        if (text) onTranscript(text);
-      }
+  const submitNow = () => {
+    if (currentInterim.trim()) {
+      console.log("[MIC] Force-submitting after silence:", currentInterim);
+      onTranscript(currentInterim.trim());
+      currentInterim = "";
     }
   };
 
-  recognition.onend = () => {
-    if (shouldListen && !paused) {
-      try {
-        recognition.start();
-      } catch {
-        // Already started
+  recognition.onresult = (event: any) => {
+    clearTimeout(silenceTimer);
+    
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        onTranscript(transcript.trim());
+        currentInterim = "";
+      } else {
+        currentInterim = transcript;
+        // If we have interim results but no final result for 1.2s, force submit.
+        silenceTimer = setTimeout(submitNow, 1200);
       }
     }
   };
 
   recognition.onerror = (event: any) => {
-    if (event.error === "not-allowed") {
-      onError("Microphone access denied. Please allow microphone access.");
-      shouldListen = false;
-    } else if (event.error === "no-speech") {
-      // Normal, just restart
-    } else if (event.error === "aborted") {
-      // Expected during pause
-    } else {
-      console.warn("[voice] recognition error:", event.error);
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    onError(event.error);
+  };
+
+  recognition.onend = () => {
+    if (active) {
+      try { recognition.start(); } catch {}
     }
   };
 
   return {
     start() {
-      shouldListen = true;
-      paused = false;
-      try {
-        recognition.start();
-      } catch {
-        // Already started
-      }
+      active = true;
+      try { recognition.start(); } catch {}
     },
     stop() {
-      shouldListen = false;
-      paused = false;
-      recognition.stop();
+      active = false;
+      clearTimeout(silenceTimer);
+      try { recognition.stop(); } catch {}
     },
-    pause() {
-      paused = true;
-      recognition.stop();
-    },
-    resume() {
-      paused = false;
-      if (shouldListen) {
-        try {
-          recognition.start();
-        } catch {
-          // Already started
-        }
+    pause() { try { recognition.stop(); } catch {} },
+    resume() { 
+      if (active) {
+        try { recognition.start(); } catch {}
       }
     },
+    setActive(val: boolean) { active = val; },
+    isActive: () => active,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Audio Player
+// Audio Player (Keep for output only)
 // ---------------------------------------------------------------------------
 
 export interface AudioPlayer {
@@ -114,80 +106,59 @@ export function createAudioPlayer(): AudioPlayer {
   const audioCtx = new AudioContext();
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 256;
-  analyser.smoothingTimeConstant = 0.8;
-  analyser.connect(audioCtx.destination);
+  const gainNode = audioCtx.createGain();
+  gainNode.gain.value = 1.3;
+  analyser.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
 
-  const queue: AudioBuffer[] = [];
+  const audioEl = new Audio();
+  audioEl.volume = 1.0;
+  audioEl.playbackRate = 1.05;
+  const mediaSource = audioCtx.createMediaElementSource(audioEl);
+  mediaSource.connect(analyser);
+
+  const queue: { url: string }[] = [];
   let isPlaying = false;
-  let currentSource: AudioBufferSourceNode | null = null;
+  let currentUrl = "";
   let finishedCallback: (() => void) | null = null;
 
-  function playNext() {
+  async function playNext() {
     if (queue.length === 0) {
       isPlaying = false;
-      currentSource = null;
       finishedCallback?.();
       return;
     }
-
     isPlaying = true;
-    const buffer = queue.shift()!;
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(analyser);
-    currentSource = source;
-
-    source.onended = () => {
-      if (currentSource === source) {
-        playNext();
-      }
-    };
-
-    source.start();
+    const item = queue.shift()!;
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
+    currentUrl = item.url;
+    audioEl.src = currentUrl;
+    audioEl.onended = () => { void playNext(); };
+    audioEl.onerror = () => { void playNext(); };
+    try { await audioEl.play(); } catch { void playNext(); }
   }
 
   return {
     async enqueue(base64: string) {
-      // Resume audio context (browser autoplay policy)
-      if (audioCtx.state === "suspended") {
-        await audioCtx.resume();
-      }
-
+      if (audioCtx.state === "suspended") await audioCtx.resume();
       try {
         const binary = atob(base64);
         const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
-        queue.push(audioBuffer);
-        if (!isPlaying) playNext();
-      } catch (err) {
-        console.error("[audio] decode error:", err);
-        // Skip bad audio, continue
-        if (!isPlaying && queue.length > 0) playNext();
-      }
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "audio/mpeg" });
+        const url = URL.createObjectURL(blob);
+        queue.push({ url });
+        if (!isPlaying) void playNext();
+      } catch (err) { console.error("[audio] enqueue error:", err); }
     },
-
     stop() {
       queue.length = 0;
-      if (currentSource) {
-        try {
-          currentSource.stop();
-        } catch {
-          // Already stopped
-        }
-        currentSource = null;
-      }
+      audioEl.pause();
+      audioEl.removeAttribute("src");
+      audioEl.load();
       isPlaying = false;
     },
-
-    getAnalyser() {
-      return analyser;
-    },
-
-    onFinished(cb: () => void) {
-      finishedCallback = cb;
-    },
+    getAnalyser() { return analyser; },
+    onFinished(cb: () => void) { finishedCallback = cb; },
   };
 }
